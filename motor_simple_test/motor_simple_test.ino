@@ -5,16 +5,16 @@
 #define TR_ctrl 4 // RS485のDE/RE制御ピン
 
 // サーボIDと角度を設定
-const byte servoID = 1; 
+const byte servoID = 3; 
 int centerPosition = 2048;
 int goalPosition = 0;
 float radiansval = 0.0; 
-float radiansIncrement = 0.06; 
+float radiansIncrement = 0.06;
 float maxPosition = 1600;
 
 void setup() {
   Serial.begin(115200);
-  
+
   // RS485制御ピンの設定
   pinMode(TR_ctrl, OUTPUT);
   digitalWrite(TR_ctrl, LOW); // 最初は受信モード（LOW）にしておく
@@ -22,6 +22,9 @@ void setup() {
   // Serial2の開始
   Serial2.begin(1000000, SERIAL_8N1, RX_PIN, TX_PIN);
   delay(100);
+  sts_set_operation_mode(servoID, 0);
+  delay(100);
+  
 }
 
 void loop() {
@@ -30,6 +33,7 @@ void loop() {
 
   goalPosition = centerPosition + int(sin(radiansval) * maxPosition);
   goalPosition = constrain(goalPosition, 0, 4095); // 範囲制限
+  
 
   sts_moveToPos(servoID, goalPosition);
   
@@ -66,4 +70,27 @@ void sts_moveToPos(byte id, int position) {
   Serial2.flush();                 // 送信完了まで待機
   delayMicroseconds(50);           // 送信後の安定待ち
   digitalWrite(TR_ctrl, LOW);     // 受信モードへ戻す
+}
+
+
+void sts_set_operation_mode(byte id, int mode) {
+  byte message[8] = {0xFF, 0xFF, id, 4, 3, 33, (byte)mode};
+  
+  byte checksum = 0;
+  for (int i = 2; i < 7; i++) checksum += message[i];
+  message[7] = ~checksum;
+
+  send_packet(message, 8);
+}
+
+// --- 通信制御用ヘルパー関数 ---
+void send_packet(byte* message, int length) {
+  // 受信バッファにゴミが残っていればクリア
+  while(Serial2.available()) Serial2.read();
+
+  digitalWrite(TR_ctrl, HIGH);   // 送信モード開始
+  Serial2.write(message, length);
+  Serial2.flush();               // 送信完了待ち
+  delayMicroseconds(50);         // RS485の切り替えマージン (物理抜け待ち)
+  digitalWrite(TR_ctrl, LOW);    // 受信モードへ戻す
 }
