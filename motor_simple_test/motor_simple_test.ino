@@ -5,7 +5,7 @@
 #define TR_ctrl 4 // RS485のDE/RE制御ピン
 
 // サーボIDと角度を設定
-const byte servoID = 3; 
+const byte servoID = 4; 
 int centerPosition = 2048;
 int goalPosition = 0;
 float radiansval = 0.0; 
