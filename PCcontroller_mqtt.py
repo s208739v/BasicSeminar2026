@@ -7,7 +7,7 @@ from inputs import get_gamepad
 BROKER_HOST = "raspberrypi.local"
  
 # ==================== PWMパラメータ ====================
-PWM_MAX = 250                  # Arduino側のPWM最大値（-1000〜1000）
+PWM_MAX = 1000                  # Arduino側のPWM最大値（-1000〜1000）
 STICK_MAX = 32767               # ゲームパッドのスティック生値の最大値
 DEADZONE = 2000                 # 不感帯（この値未満は0とみなす）
 PWM_SCALE = PWM_MAX / STICK_MAX # スティック生値 → PWM値への変換係数
@@ -22,7 +22,7 @@ stick_inputs = {
     "ABS_RY": 0,
     "ABS_RX": 0
 }
- 
+
 
 # 【重要】ゲームパッドの最終受信時刻（初期値は現在時刻）
 last_gamepad_recv_time = time.time()

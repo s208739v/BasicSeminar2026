@@ -20,12 +20,31 @@ private:
         digitalWrite(_tr_pin, HIGH);
         _serial->write(message, length);
         _serial->flush(); 
-        
-        // 【修正】半二重RS485の送信完了に必要な物理ウェイトを追加
-        delayMicroseconds(10);
 
         digitalWrite(_tr_pin, LOW);
         delayMicroseconds(50);
+
+        // ★追加：抵抗ミックス回路では自分の送信がRXにも回り込むため、
+        //        送った分(length)だけエコーとして読み捨てる
+        discard_echo(length);
+    }
+
+    // ★新規追加：エコーバック読み捨て専用関数
+   bool discard_echo(int expected_length) {
+        int count = 0;
+        unsigned long startTime = micros();
+        // 安全弁として数十us程度だけ見る（待つためではなく、ハング防止のため）
+        while (count < expected_length && (micros() - startTime) < 50) {
+            if (_serial->available()) {
+                _serial->read();
+                count++;
+            }
+        }
+        if (count != expected_length) {
+            Serial.printf("[ECHO WARN] expected=%d got=%d\n", expected_length, count);
+            return false;
+        }
+        return true;
     }
     
 
