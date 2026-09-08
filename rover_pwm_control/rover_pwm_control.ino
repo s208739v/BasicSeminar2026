@@ -9,10 +9,10 @@
 const uint8_t MOTOR_ID[4] = {1, 2, 3, 4};
 const int NUM_MOTORS = 4;
 
-// ==================== 急動作防止パラメータ ====================
-// 指令位置と現在の追従位置との差が大きいときに、1回の更新でどこまで進めるかを制限する
-const float MAX_STEP_DEG_PER_UPDATE = 1.0f;     // 1更新あたりの最大移動角度 [deg]
-const unsigned long UPDATE_INTERVAL_MS = 20;    // 追従位置の更新周期 [ms]
+// ==================== 急発進防止パラメータ ====================
+// 指令PWMと現在の追従PWMとの差が大きいときに、1回の更新でどこまで変化させるかを制限する
+const int MAX_PWM_STEP_PER_UPDATE = 50;         // 1更新あたりの最大PWM変化量 (-1000〜1000スケール)
+const unsigned long UPDATE_INTERVAL_MS = 20;    // 追従PWMの更新周期 [ms]
 
 // ==================== 現在位置送信パラメータ ====================
 const unsigned long REPORT_INTERVAL_MS = 100;   // 現在位置をPCへ送信する周期 [ms]
@@ -23,24 +23,22 @@ private:
     HardwareSerial* _serial;
     int _tr_pin;
 
-
     void send_packet(uint8_t* message, int length) {
         while (_serial->available()) _serial->read();
 
         digitalWrite(_tr_pin, HIGH);
         _serial->write(message, length);
-        _serial->flush(); 
+        _serial->flush();
 
         digitalWrite(_tr_pin, LOW);
         delayMicroseconds(50);
 
-        // ★追加：抵抗ミックス回路では自分の送信がRXにも回り込むため、
-        //        送った分(length)だけエコーとして読み捨てる
+        // 抵抗ミックス回路では自分の送信がRXにも回り込むため、
+        // 送った分(length)だけエコーとして読み捨てる
         discard_echo(length);
     }
 
-    // ★新規追加：エコーバック読み捨て専用関数
-   bool discard_echo(int expected_length) {
+    bool discard_echo(int expected_length) {
         int count = 0;
         unsigned long startTime = micros();
         // 安全弁として数十us程度だけ見る（待つためではなく、ハング防止のため）
@@ -56,8 +54,6 @@ private:
         }
         return true;
     }
-    
-
 
     long sts_read_register(uint8_t id, uint8_t address, uint8_t length) {
         uint8_t message[8];
@@ -224,37 +220,13 @@ public:
             return val & 0x7FFF;
         }
     }
-
-    // 【追加】目標位置への移動指令（アドレス42: Goal Position/Time/Speed）
-    // position: 0-4095, time: [ms], speed: [任意単位、0で最大速度]
-    void sts_moveToPos(uint8_t id, int position, uint16_t time = 0, uint16_t speed = 0) {
-        uint8_t message[13];
-        message[0] = 0xFF;
-        message[1] = 0xFF;
-        message[2] = id;
-        message[3] = 9;
-        message[4] = 3;
-        message[5] = 42;
-        message[6] = position & 0xFF;
-        message[7] = (position >> 8) & 0xFF;
-        message[8] = time & 0xFF;
-        message[9] = (time >> 8) & 0xFF;
-        message[10] = speed & 0xFF;
-        message[11] = (speed >> 8) & 0xFF;
-
-        uint8_t checksum = 0;
-        for (int i = 2; i < 12; i++) checksum += message[i];
-        message[12] = ~checksum;
-
-        send_packet(message, 13);
-    }
 };
 
 // ==================== グローバル変数 ====================
 STS3215 servo(Serial2, TR_ctrl);
 
-float targetPositionDeg[NUM_MOTORS];   // ユーザーが指令した最終目標角度
-float commandPositionDeg[NUM_MOTORS];  // 実際にサーボへ毎周期送る、なめらかに追従中の角度
+int targetPWM[NUM_MOTORS];    // ユーザーが指令した最終目標PWM (-1000〜1000)
+float commandPWM[NUM_MOTORS]; // 実際にサーボへ毎周期送る、なめらかに追従中のPWM
 
 unsigned long lastUpdateTime = 0;
 unsigned long lastReportTime = 0;
@@ -267,27 +239,20 @@ void setup() {
 
     servo.begin(1000000, RX_PIN, TX_PIN);
 
-    // 4軸とも位置制御モードに設定
+    // 4輪ともPWM(オープンループ)モードに設定
     for (int i = 0; i < NUM_MOTORS; i++) {
-        servo.sts_set_operation_mode(MOTOR_ID[i], 1); // 0 = 位置制御モード
+        servo.sts_set_operation_mode(MOTOR_ID[i], 2); // 2 = PWMモード
         delay(50);
     }
 
-    Serial.println("Ready. Enter 4 target positions as: p1,p2,p3,p4 (each 0-4095)");
-    Serial.println("Example: 2048,2048,2048,2048");
-
-    // 起動時、実際の現在位置を読み取り、目標値・追従値の初期値とする
-    // （読み取れた実位置から始めるので、起動直後にいきなり動くことがない）
     for (int i = 0; i < NUM_MOTORS; i++) {
-        float posDeg = servo.sts_readPos(MOTOR_ID[i]);
-        if (posDeg < 0) {
-            posDeg = 180.0; // 読み取り失敗時のフォールバック（中央付近）
-            Serial.print("Warning: failed to read position of motor ");
-            Serial.println(MOTOR_ID[i]);
-        }
-        targetPositionDeg[i] = posDeg;
-        commandPositionDeg[i] = posDeg;
+        targetPWM[i] = 0;
+        commandPWM[i] = 0;
+        servo.sts_pwm_target(MOTOR_ID[i], 0); // 起動時は必ず停止状態から開始
     }
+
+    Serial.println("Ready. Enter 4 target PWMs as: p1,p2,p3,p4 (each -1000 to 1000)");
+    Serial.println("Example: 300,300,-300,-300");
 }
 
 void loop() {
@@ -296,7 +261,7 @@ void loop() {
     unsigned long now = millis();
     if (now - lastUpdateTime >= UPDATE_INTERVAL_MS) {
         lastUpdateTime = now;
-        updateMotorPositions();
+        updateMotorPWMs();
     }
 
     if (now - lastReportTime >= REPORT_INTERVAL_MS) {
@@ -305,7 +270,7 @@ void loop() {
     }
 }
 
-// "p1,p2,p3,p4" 形式（0-4095）で4軸分の目標位置を一括受信する
+// "p1,p2,p3,p4" 形式（-1000〜1000）で4輪分の目標PWMを一括受信する
 void handleSerialInput() {
     if (Serial.available() <= 0) return;
 
@@ -329,54 +294,48 @@ void handleSerialInput() {
     }
 
     if (idx != NUM_MOTORS) {
-        Serial.println("Invalid format! Use: p1,p2,p3,p4 (e.g. 2048,2048,2048,2048)");
+        Serial.println("Invalid format! Use: p1,p2,p3,p4 (e.g. 300,300,-300,-300)");
         return;
     }
 
     for (int i = 0; i < NUM_MOTORS; i++) {
-        if (values[i] < 0 || values[i] > 4095) {
+        if (values[i] < -1000 || values[i] > 1000) {
             Serial.print("Motor "); Serial.print(MOTOR_ID[i]);
-            Serial.println(": Invalid range! Enter 0-4095. (skipped)");
+            Serial.println(": Invalid range! Enter -1000 to 1000. (skipped)");
             continue;
         }
-        // 目標値だけを更新。実際にサーボへ送るcommandPositionDegは
-        // updateMotorPositions()の中で少しずつ近づけていく。
-        targetPositionDeg[i] = values[i] * 360.0f / 4095.0f;
-
-        Serial.print("Motor "); Serial.print(MOTOR_ID[i]);
-        Serial.print(" new target: "); Serial.println(values[i]);
+        // 目標値だけを更新。実際にサーボへ送るcommandPWMは
+        // updateMotorPWMs()の中で少しずつ近づけていく。
+        targetPWM[i] = values[i];
     }
 }
 
-// 目標位置(targetPositionDeg)に向かって、追従位置(commandPositionDeg)を
-// 1周期あたり最大 MAX_STEP_DEG_PER_UPDATE だけ近づけてからサーボへ送信する。
-// これにより、指令値と現在位置との差が大きい場合でも、いきなり大きく動かず
-// なめらかに目標へ移動する。
-void updateMotorPositions() {
+// 目標PWM(targetPWM)に向かって、追従PWM(commandPWM)を
+// 1周期あたり最大 MAX_PWM_STEP_PER_UPDATE だけ近づけてからサーボへ送信する。
+// これにより、指令値が急に大きく変わった場合でも急発進せず、なめらかに追従する。
+void updateMotorPWMs() {
     for (int i = 0; i < NUM_MOTORS; i++) {
-        float diff = targetPositionDeg[i] - commandPositionDeg[i];
+        float diff = targetPWM[i] - commandPWM[i];
 
-        if (fabs(diff) < 0.01f) continue; // ほぼ到達済みなら何もしない
+        if (fabs(diff) < 0.5f) continue; // ほぼ到達済みなら何もしない
 
         float step;
-        if (fabs(diff) > MAX_STEP_DEG_PER_UPDATE) {
-            // 差が大きい → 最大ステップ量に制限してゆっくり近づける
-            step = (diff > 0) ? MAX_STEP_DEG_PER_UPDATE : -MAX_STEP_DEG_PER_UPDATE;
+        if (fabs(diff) > MAX_PWM_STEP_PER_UPDATE) {
+            step = (diff > 0) ? MAX_PWM_STEP_PER_UPDATE : -MAX_PWM_STEP_PER_UPDATE;
         } else {
-            // 差が小さい → そのまま到達させる
             step = diff;
         }
 
-        commandPositionDeg[i] += step;
+        commandPWM[i] += step;
 
-        int posValue = (int)(commandPositionDeg[i] * 4095.0f / 360.0f);
-        posValue = constrain(posValue, 0, 4095);
+        int pwmValue = (int)commandPWM[i];
+        pwmValue = constrain(pwmValue, -1000, 1000);
 
-        servo.sts_moveToPos(MOTOR_ID[i], posValue);
+        servo.sts_pwm_target(MOTOR_ID[i], pwmValue);
     }
 }
 
-// 4軸すべての実際の現在位置をサーボから読み取り、
+// 4輪すべての実際の現在位置をサーボから読み取り、
 // "pos:p1,p2,p3,p4" 形式（各0-4095、読み取り失敗時は-1）でPCへ送信する。
 void reportCurrentPositions() {
     int rawPos[NUM_MOTORS];
